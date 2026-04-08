@@ -51,7 +51,4 @@ python3 tasc/scripts/run_react_baseline.py --backend gemini --gemini-model gemin
 ```
 
 **Flags:** `--split train|dev|test` (default `dev`), `--data PATH` to override the JSON file, `--limit N` (omit to run the whole split), `--cot`, `--out PATH`. Logs: **`tasc/results/*.jsonl`**.
-
-Secrets: copy **`tasc/.env.example`** → **`tasc/.env`**; never commit real keys.
-
 ---
