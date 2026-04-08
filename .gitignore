@@ -1,0 +1,72 @@
+# --- Secrets & local env (never commit keys) ---
+.env
+.env.local
+.env.*.local
+!.env.example
+!**/.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+# common custom venv directory names (e.g. at repo root)
+myenv/
+.virtualenv/
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.pytype/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Editors / IDE ---
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Local tooling ---
+.cursor/
+
+# --- This project: LLM experiment logs (regenerate from runs) ---
+tasc/results/
+
+# --- Upstream / local clones (large data, models, caches — keep beside repo, not in Git) ---
+FinQA-main/
+TAT-QA-master/
+
+# --- Logs & temp ---
+*.log
+tmp/
+temp/
+*.tmp
+
+# --- Optional: large / generated model checkpoints (uncomment if you store weights here) ---
+# *.pt
+# *.pth
+# *.ckpt
+# *.bin
+# *.safetensors
