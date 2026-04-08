@@ -50,5 +50,12 @@ python3 tasc/scripts/run_react_baseline.py --limit 10
 python3 tasc/scripts/run_react_baseline.py --backend gemini --gemini-model gemini-2.5-flash --limit 5
 ```
 
-**Flags:** `--split train|dev|test` (default `dev`), `--data PATH` to override the JSON file, `--limit N` (omit to run the whole split), `--cot`, `--out PATH`. Logs: **`tasc/results/*.jsonl`**.
----
+Common CLI options:
+
+- `--split train|dev|test` (default `dev`)
+- `--data PATH` — use a different JSON file
+- `--limit N` — omit to run the full split
+- `--cot`, `--out PATH`
+- Logs: `tasc/results/*.jsonl`
+
+Secrets: use `tasc/.env` from `tasc/.env.example`; never commit API keys.
