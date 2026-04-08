@@ -20,7 +20,7 @@ You should have **`FinQA-main/dataset/train.json`**, **`dev.json`**, **`test.jso
 
 Avoid committing Hugging Face caches inside `FinQA-main` (e.g. remove **`FinQA-main/.cache/`** if you do not need it, or keep it only on disk).
 
-### TAT-QA (optional)
+### TAT-QA
 
 Clone or unpack the TAT-QA release your course uses into:
 
@@ -55,14 +55,3 @@ python3 tasc/scripts/run_react_baseline.py --backend gemini --gemini-model gemin
 Secrets: copy **`tasc/.env.example`** → **`tasc/.env`**; never commit real keys.
 
 ---
-
-## 3. If GitHub rejected a push (large files)
-
-`FinQA-main` / `TAT-QA-master` must stay **ignored** and **untracked**. If you already committed them:
-
-```bash
-git rm -r --cached FinQA-main TAT-QA-master
-git commit -m "Stop tracking FinQA-main and TAT-QA-master"
-```
-
-If the remote still complains, an **earlier commit** may still contain those blobs—squash to one commit and recommit, or use **[git filter-repo](https://github.com/newren/git-filter-repo)** to remove those paths from history, then push again.
