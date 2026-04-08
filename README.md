@@ -56,6 +56,4 @@ Common CLI options:
 - `--data PATH` — use a different JSON file
 - `--limit N` — omit to run the full split
 - `--cot`, `--out PATH`
-- Logs: `tasc/results/*.jsonl`
-
-Secrets: use `tasc/.env` from `tasc/.env.example`; never commit API keys.
+- Logs: `tasc/results/*.jsonl`.
