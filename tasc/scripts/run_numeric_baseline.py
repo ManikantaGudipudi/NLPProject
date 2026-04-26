@@ -6,7 +6,7 @@ Usage (from repo root NLPProject):
   # Ollama (local)
   python tasc/scripts/run_numeric_baseline.py --limit 5
   python tasc/scripts/run_numeric_baseline.py --split train --limit 50
-  OLLAMA_MODEL=llama3.1:8b python tasc/scripts/run_numeric_baseline.py --limit 3
+  OLLAMA_MODEL=llama3.2:3b python tasc/scripts/run_numeric_baseline.py --limit 3
 
   # Google Gemini (needs GEMINI_API_KEY in env — never commit the key)
   export GEMINI_API_KEY=...

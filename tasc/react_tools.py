@@ -47,13 +47,36 @@ def _eval_node(node: ast.AST) -> float:
     raise ValueError(f"disallowed syntax: {type(node).__name__}")
 
 
+def _sanitize_expression(expr: str) -> str:
+    """
+    Clean up common LLM formatting in calculator expressions so they parse
+    as valid Python arithmetic: strip currency symbols, commas inside numbers,
+    Unicode operators, whitespace-only junk, etc.
+    """
+    expr = expr.replace("$", "")
+    expr = expr.replace("÷", "/")
+    expr = expr.replace("×", "*")
+    expr = expr.replace("−", "-")       # Unicode minus
+    expr = expr.replace("\u2013", "-")   # en-dash
+    expr = expr.replace("\u2014", "-")   # em-dash
+    # Strip commas that are thousands-separators (digit,digit pattern)
+    import re
+    expr = re.sub(r"(\d),(\d)", r"\1\2", expr)
+    # Remove stray text like trailing "= 123" that some models append
+    expr = re.split(r"\s*=\s*(?=\s*-?\d|$)", expr)[0]
+    return expr.strip()
+
+
 def safe_calculate(expression: str) -> tuple[float | None, str | None]:
     """
     Evaluate a pure arithmetic expression.
 
+    Automatically sanitizes common LLM formatting (``$``, ``÷``, commas, etc.)
+    before evaluation.
+
     Returns ``(value, None)`` on success, or ``(None, error_message)``.
     """
-    expr = (expression or "").strip()
+    expr = _sanitize_expression((expression or "").strip())
     if not expr:
         return None, "empty expression"
 

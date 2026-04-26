@@ -70,11 +70,16 @@ def _finqa_qa_numeric_close(gf: float, pf: float) -> bool:
     """
     Compare FinQA ``qa.answer``-style numbers after ``finqa_str_to_num``.
 
-    ``rel_tol=1e-4`` is too strict for common display rounding (e.g. ``60.3%`` vs
-    ``60.31%``, or ``3044%`` vs ``3044.32%``). Slightly looser tolerances match
-    one-extra-decimal and similar table/LLM rounding without opening large holes.
+    Gold answers in FinQA are display-rounded from financial reports, so the
+    model's more-precise answer (e.g. ``33.33%`` vs gold ``33.3%``) should still
+    count.  We use a tiered tolerance:
+
+    * ``rel_tol=5e-3`` (0.5 %) covers one-extra-decimal-place rounding
+      (``3.2%`` vs ``3.23%``, ``87%`` vs ``86.64%``, ``104.85%`` vs ``105%``).
+    * ``abs_tol=0.005`` catches near-zero values where relative tolerance blows
+      up (e.g. ``0%`` vs ``0.001``).
     """
-    return math.isclose(pf, gf, rel_tol=5e-4, abs_tol=1e-4)
+    return math.isclose(pf, gf, rel_tol=5e-3, abs_tol=5e-3)
 
 
 def answer_matches(gold: Any, predicted_raw: str | None) -> bool:
@@ -97,11 +102,24 @@ def answer_matches(gold: Any, predicted_raw: str | None) -> bool:
     return math.isclose(pf, gf, rel_tol=1e-4, abs_tol=1e-5)
 
 
+def _strip_pct(s: str) -> str:
+    """Remove a trailing ``%`` and surrounding whitespace."""
+    return s.replace("%", "").strip()
+
+
 def answer_matches_qa_answer(gold_answer: str | None, predicted_raw: str | None) -> bool:
     """
     Compare prediction to FinQA ``qa.answer`` (display string: decimals, ``93.5%``, etc.).
-    Yes/no questions: case-insensitive string match.
-    Numeric: canonical float via ``finqa_str_to_num`` on both sides, then ``math.isclose``.
+
+    Handles three tricky cases that frequently arise with LLMs:
+
+    1. **Normal path** — both sides go through ``finqa_str_to_num`` (``%`` → ÷100)
+       and are compared with ``_finqa_qa_numeric_close``.
+    2. **Percent ↔ decimal mismatch** — the model outputs the decimal equivalent
+       of a percentage answer (``0.6039`` for gold ``60.3%``), or vice-versa.
+       We try ``pred × 100`` vs gold-display, and ``pred`` vs ``gold-display / 100``.
+    3. **Missing ``%`` sign** — model writes ``37.81`` when gold is ``37.81%``.
+       We compare the raw display numbers (``37.81`` ≈ ``37.81``) directly.
     """
     if predicted_raw is None or gold_answer is None:
         return False
@@ -118,22 +136,61 @@ def answer_matches_qa_answer(gold_answer: str | None, predicted_raw: str | None)
     if gl in ("yes", "no"):
         return pl == gl
 
+    # --- canonical comparison (both through finqa_str_to_num) ---
     gf = finqa_str_to_num(gold_answer)
     pf = finqa_str_to_num(pred)
     if gf is not None and pf is not None:
-        return _finqa_qa_numeric_close(gf, pf)
+        if _finqa_qa_numeric_close(gf, pf):
+            return True
+
+    # --- cross-format: missing % sign ---
+    # gold = "37.81%", pred = "37.81" → compare display numbers directly
+    gold_has_pct = "%" in gold_answer
+    pred_has_pct = "%" in pred
+    if gold_has_pct != pred_has_pct:
+        g_display = _to_float(_strip_pct(gold_answer))
+        p_display = _to_float(_strip_pct(pred))
+        if g_display is not None and p_display is not None:
+            if _finqa_qa_numeric_close(g_display, p_display):
+                return True
+
+    # --- cross-format: decimal ↔ percentage ---
+    # gold = "60.3%" (gf=0.603), pred = "0.6039" (pf=0.6039) → already close
+    # gold = "57%" (gf=0.57), pred = "57" (pf=57) → try pf/100
+    if gf is not None and pf is not None:
+        if pf != 0 and _finqa_qa_numeric_close(gf, pf / 100.0):
+            return True
+        if gf != 0 and _finqa_qa_numeric_close(gf * 100.0, pf):
+            return True
 
     return pl == gold_answer.lower().replace(",", "").strip()
 
 
 def extract_react_final_answer(predicted_raw: str | None) -> str | None:
-    """Last ``Final Answer:`` line (single-line value), or ``None``."""
+    """
+    Last ``Final Answer:`` line (single-line value), or ``None``.
+
+    Cleans common LLM noise: leading ``$``, inline calculator expressions
+    (``calculator (1+2)= 3`` → ``3``), units, etc.
+    """
     if predicted_raw is None or not str(predicted_raw).strip():
         return None
     matches = list(_REACT_FINAL_RE.finditer(str(predicted_raw).strip()))
     if not matches:
         return None
-    return matches[-1].group(1).strip()
+    val = matches[-1].group(1).strip()
+
+    # Model sometimes writes "calculator <expr> = <result>" as final answer
+    eq_parts = val.rsplit("=", 1)
+    if len(eq_parts) == 2 and eq_parts[1].strip():
+        candidate = eq_parts[1].strip()
+        if re.match(r"^-?\d", candidate):
+            val = candidate
+
+    val = val.replace("$", "").replace(",", "").strip()
+    # Strip trailing unit words like "million", "billion", "thousand"
+    val = re.sub(r"\s*(million|billion|thousand|mn|bn)s?\s*$", "", val, flags=re.IGNORECASE)
+    return val.strip() if val.strip() else None
 
 
 def answer_matches_react_qa_answer(gold_answer: str | None, predicted_raw: str | None) -> bool:
