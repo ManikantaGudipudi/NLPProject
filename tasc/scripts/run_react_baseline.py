@@ -5,7 +5,7 @@ Minimal ReAct baseline on FinQA: at most 2 model calls, at most one calculator u
 Usage (from repo root NLPProject):
   python tasc/scripts/run_react_baseline.py --limit 5
   python tasc/scripts/run_react_baseline.py --split test --limit 20
-  OLLAMA_MODEL=llama3.2:3b python tasc/scripts/run_react_baseline.py --limit 3
+  OLLAMA_MODEL=deepseek-r1:32b python tasc/scripts/run_react_baseline.py --limit 3
 
   export GEMINI_API_KEY=...
   python tasc/scripts/run_react_baseline.py --backend gemini --gemini-model gemini-2.5-flash --limit 3

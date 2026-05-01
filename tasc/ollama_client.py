@@ -40,7 +40,7 @@ def ollama_chat(
     ``options`` is passed to Ollama (e.g. {"temperature": 0.1, "num_predict": 256}).
     """
     base = (host or os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")).rstrip("/")
-    model = model or os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+    model = model or os.environ.get("OLLAMA_MODEL", "deepseek-r1:32b")
     payload: dict = {
         "model": model,
         "messages": messages,

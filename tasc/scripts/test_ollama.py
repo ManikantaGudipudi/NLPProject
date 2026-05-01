@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Smoke test: verify Ollama is running and a Llama model responds.
+Smoke test: verify Ollama is running and a model responds.
 
 Usage:
   python test_ollama.py
-  OLLAMA_MODEL=llama3.2:3b python test_ollama.py
+  OLLAMA_MODEL=deepseek-r1:32b python test_ollama.py
   OLLAMA_HOST=http://127.0.0.1:11434 python test_ollama.py
 
 Requires: Ollama installed and running (`ollama serve`), model pulled once.
@@ -24,7 +24,7 @@ import ollama_client  # noqa: E402
 
 def main() -> int:
     host = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
-    model = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+    model = os.environ.get("OLLAMA_MODEL", "deepseek-r1:32b")
 
     print(f"Ollama host: {host}")
     print(f"Model:       {model}")

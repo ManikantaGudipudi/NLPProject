@@ -16,8 +16,8 @@ from typing import Any, Callable
 
 import verification_prompts
 
-_VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FAIL)", re.IGNORECASE)
-_REASON_RE = re.compile(r"REASON:\s*(.+)", re.IGNORECASE | re.DOTALL)
+_VERDICT_RE = re.compile(r"\bVERDICT\b\s*(?::|-)?\s*(PASS|FAIL)\b", re.IGNORECASE)
+_REASON_RE = re.compile(r"\bREASON\b\s*(?::|-)?\s*(.+)", re.IGNORECASE | re.DOTALL)
 
 
 # ------------------------------------------------------------------
@@ -36,13 +36,31 @@ def parse_critic_verdict(raw: str) -> tuple[bool, str]:
     passed = False
     reason = ""
 
-    verdicts = list(_VERDICT_RE.finditer(raw))
+    # Normalize line endings and strip common markdown emphasis wrappers so
+    # verdict/reason parsing is robust across styles like:
+    #   **VERDICT:** PASS
+    #   __REASON__: ...
+    norm = raw.replace("\r\n", "\n")
+    parse_text = re.sub(r"(\*\*|__|`)", "", norm)
+
+    verdicts = list(_VERDICT_RE.finditer(parse_text))
     if verdicts:
         passed = verdicts[-1].group(1).upper() == "PASS"
+    else:
+        # Fallback: handle odd line-break variants like:
+        # "VERDICT\nPASS" or "VERDICT\n\nFAIL"
+        verdict_lines = list(re.finditer(r"\bVERDICT\b", parse_text, flags=re.IGNORECASE))
+        if verdict_lines:
+            tail = parse_text[verdict_lines[-1].end(): verdict_lines[-1].end() + 80]
+            m = re.search(r"\b(PASS|FAIL)\b", tail, flags=re.IGNORECASE)
+            if m:
+                passed = m.group(1).upper() == "PASS"
 
-    reasons = list(_REASON_RE.finditer(raw))
+    reasons = list(_REASON_RE.finditer(parse_text))
     if reasons:
         reason = reasons[-1].group(1).strip().split("\n\n")[0].strip()
+        # Trim trailing markdown emphasis artifacts.
+        reason = reason.strip("*").strip()
 
     if not reason and raw:
         reason = raw[:300]

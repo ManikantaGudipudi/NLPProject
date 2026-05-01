@@ -11,7 +11,7 @@ Three modes:
 Usage (from repo root NLPProject):
   python tasc/scripts/run_experiment.py --mode cot              --limit 5
   python tasc/scripts/run_experiment.py --mode react_tool       --limit 5
-  python tasc/scripts/run_experiment.py --mode react_tool_verify --limit 5 --max-retries 3
+  python tasc/scripts/run_experiment.py --mode react_tool_verify --limit 5 --max-retries 2
 
   # Gemini backend
   export GEMINI_API_KEY=...
@@ -43,6 +43,165 @@ import react_prompts  # noqa: E402
 import react_tools  # noqa: E402
 import verification  # noqa: E402
 import verification_prompts  # noqa: E402
+
+
+# ======================================================================
+# Dataset adapters (FinQA / TAT-QA)
+# ======================================================================
+
+def _default_tatqa_json_path(repo_root: Path, split: str = "dev") -> Path:
+    """
+    Default path to ``TAT-QA-master/dataset_raw/tatqa_dataset_<split>.json``.
+    """
+    return repo_root / "TAT-QA-master" / "dataset_raw" / f"tatqa_dataset_{split}.json"
+
+
+def _coerce_table_rows(table_obj) -> list[list[str]]:
+    """Best-effort conversion of TAT-QA table objects to row lists."""
+    if isinstance(table_obj, list):
+        rows = table_obj
+    elif isinstance(table_obj, dict):
+        rows = table_obj.get("table") or table_obj.get("rows") or []
+    else:
+        rows = []
+
+    out: list[list[str]] = []
+    for row in rows:
+        if isinstance(row, list):
+            out.append([str(c) for c in row])
+        elif isinstance(row, dict):
+            cells = row.get("row") or row.get("cells") or list(row.values())
+            if isinstance(cells, list):
+                out.append([str(c) for c in cells])
+    return out
+
+
+def _coerce_paragraphs(paragraphs_obj) -> list[str]:
+    """Best-effort extraction of paragraph text fields from TAT-QA records."""
+    if not isinstance(paragraphs_obj, list):
+        return []
+    out: list[str] = []
+    for p in paragraphs_obj:
+        if isinstance(p, str):
+            text = p
+        elif isinstance(p, dict):
+            text = (
+                p.get("text")
+                or p.get("paragraph")
+                or p.get("content")
+                or p.get("sentence")
+                or ""
+            )
+        else:
+            text = ""
+        text = str(text).strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _coerce_tatqa_answer(q: dict) -> str | None:
+    """
+    Convert TAT-QA answer field into a string comparable by current scorers.
+    """
+    ans = q.get("answer")
+    if ans is None:
+        ans = q.get("answer_text")
+    if ans is None:
+        return None
+    if isinstance(ans, list):
+        if not ans:
+            return None
+        # Keep multi-span answers deterministic.
+        return " | ".join(str(a).strip() for a in ans if str(a).strip())
+    s = str(ans).strip()
+    return s if s else None
+
+
+def _flatten_tatqa_examples(raw_data: list[dict]) -> list[dict]:
+    """
+    Flatten TAT-QA doc-level JSON into FinQA-like per-question examples.
+    """
+    flat: list[dict] = []
+    for d_i, doc in enumerate(raw_data):
+        if not isinstance(doc, dict):
+            continue
+
+        doc_uid = str(doc.get("uid") or doc.get("id") or f"doc_{d_i}")
+        table_rows = _coerce_table_rows(doc.get("table"))
+        paragraphs = _coerce_paragraphs(doc.get("paragraphs") or doc.get("paragraph"))
+        questions = doc.get("questions") or doc.get("qas") or []
+        if not isinstance(questions, list):
+            continue
+
+        for q_i, q in enumerate(questions):
+            if not isinstance(q, dict):
+                continue
+            question = str(q.get("question") or "").strip()
+            answer = _coerce_tatqa_answer(q)
+            if not question or answer is None:
+                continue
+            qid = str(q.get("uid") or q.get("id") or f"{doc_uid}-q{q_i}")
+            flat.append({
+                "id": qid,
+                "pre_text": paragraphs,
+                "post_text": [],
+                "table": table_rows,
+                "qa": {
+                    "question": question,
+                    "answer": answer,
+                    "answer_type": q.get("answer_type"),
+                    "answer_from": q.get("answer_from"),
+                    "scale": q.get("scale"),
+                },
+            })
+    return flat
+
+
+def _resolve_dataset(
+    repo: Path,
+    *,
+    dataset: str,
+    split: str,
+    data_path_arg: Path | None,
+) -> tuple[Path, str]:
+    if data_path_arg is not None:
+        return data_path_arg, data_path_arg.stem
+    if dataset == "tatqa":
+        return _default_tatqa_json_path(repo, split), split
+    return finqa_format.default_finqa_json_path(repo, split), split
+
+
+def _load_examples(dataset: str, data_path: Path) -> list[dict]:
+    with open(data_path, encoding="utf-8") as f:
+        raw = json.load(f)
+    if dataset == "tatqa":
+        if not isinstance(raw, list):
+            raise ValueError("TAT-QA JSON must be a list of document records")
+        return _flatten_tatqa_examples(raw)
+    if not isinstance(raw, list):
+        raise ValueError("FinQA JSON must be a list of examples")
+    return raw
+
+
+def _format_context(example: dict, dataset: str) -> str:
+    base = finqa_format.format_finqa_context(example)
+    if dataset != "tatqa":
+        return base
+    qa = example.get("qa") or {}
+    at = qa.get("answer_type")
+    sc = qa.get("scale")
+    af = qa.get("answer_from")
+    meta = []
+    if at:
+        meta.append(f"answer_type: {at}")
+    if sc:
+        meta.append(f"scale: {sc}")
+    if af:
+        meta.append(f"answer_from: {af}")
+    if not meta:
+        return base
+    return base + "\n\n## Expected Answer Metadata\n" + "\n".join(f"- {m}" for m in meta)
 
 
 # ======================================================================
@@ -104,6 +263,67 @@ Show concise step-by-step reasoning in this order:
 
 Then end with exactly one final line:
 FINAL: <value>
+"""
+
+COT_SYSTEM_PROMPT_TATQA = """\
+You are a precise financial question-answering assistant.
+
+Use only the passage and table provided in the user message.
+Do not use outside knowledge. Do not guess.
+
+Reason briefly in this structure:
+1. RELEVANT VALUES
+2. OPERATION / DECISION
+3. ANSWER CHECK
+
+Then on the final line output exactly:
+FINAL: <value>
+
+For <value>:
+- If question asks for numeric result, output only the number (or percentage when asked).
+- If question asks span text, output the exact phrase from context.
+- If question asks multi-span/list, output items separated by " | " in one line.
+- No extra text after FINAL line.
+"""
+
+COT_USER_SUFFIX_TATQA = """
+
+Answer using only the passage/table above.
+Respect the expected answer type and scale metadata shown in the context.
+End with exactly one final line:
+FINAL: <value>
+"""
+
+REACT_SYSTEM_PROMPT_TATQA = """\
+You are a precise financial QA assistant with calculator access.
+
+Use calculator for arithmetic/comparisons when computation is required.
+If question is textual span or list extraction, do not force arithmetic.
+
+Output format:
+Thought: <brief reasoning>
+Either:
+  Action: calculator
+  Action Input: <expression>
+or:
+  Final Answer: <value>
+
+After Observation, output:
+Thought: <brief conclusion>
+Final Answer: <value>
+
+Final Answer rules:
+- Numeric questions: output number only (or % if asked).
+- Span questions: output exact phrase from context.
+- Multi-span/list questions: output single-line items separated by " | ".
+- No extra text on Final Answer line.
+"""
+
+REACT_USER_SUFFIX_TATQA = """
+
+Answer the question using only the passage/table above.
+Use calculator only when computation is required.
+Follow Thought / Action / Final Answer format exactly.
 """
 
 
@@ -194,6 +414,7 @@ def generate_cot(
     example: dict,
     *,
     backend: str,
+    dataset: str,
     gemini_model: str | None,
     timeout: int,
 ) -> dict:
@@ -201,11 +422,16 @@ def generate_cot(
     Run CoT generation.  Returns dict with keys:
     raw, reasoning, predicted, model_calls.
     """
-    context = finqa_format.format_finqa_context(example)
-    user_msg = context + COT_USER_SUFFIX
+    context = _format_context(example, dataset)
+    if dataset == "tatqa":
+        user_msg = context + COT_USER_SUFFIX_TATQA
+        system_prompt = COT_SYSTEM_PROMPT_TATQA
+    else:
+        user_msg = context + COT_USER_SUFFIX
+        system_prompt = COT_SYSTEM_PROMPT
 
     raw = _call_llm(
-        backend, COT_SYSTEM_PROMPT, user_msg,
+        backend, system_prompt, user_msg,
         gemini_model=gemini_model, timeout=timeout, max_tokens=2048,
     )
     predicted = numeric_eval.parse_predicted_answer(raw)
@@ -229,6 +455,7 @@ def generate_react(
     example: dict,
     *,
     backend: str,
+    dataset: str,
     gemini_model: str | None,
     timeout: int,
     debug: bool = False,
@@ -244,8 +471,13 @@ def generate_react(
     raw_turn1, raw_turn2, reasoning, predicted, model_calls,
     tool_used, observation, parsed_turn1.
     """
-    context = finqa_format.format_finqa_context(example)
-    user_suffix = react_prompts.REACT_USER_SUFFIX
+    context = _format_context(example, dataset)
+    if dataset == "tatqa":
+        system_prompt = REACT_SYSTEM_PROMPT_TATQA
+        user_suffix = REACT_USER_SUFFIX_TATQA
+    else:
+        system_prompt = react_prompts.REACT_SYSTEM_PROMPT
+        user_suffix = react_prompts.REACT_USER_SUFFIX
 
     if feedback:
         user1 = (
@@ -257,7 +489,7 @@ def generate_react(
 
     messages1: list[dict[str, str]] = [{"role": "user", "content": user1}]
     raw1 = _call_llm_chat(
-        backend, react_prompts.REACT_SYSTEM_PROMPT, messages1,
+        backend, system_prompt, messages1,
         gemini_model=gemini_model, timeout=timeout, max_tokens=2048,
     )
     p1 = react_parse.parse_react_block(raw1)
@@ -286,7 +518,7 @@ def generate_react(
             {"role": "user", "content": user2},
         ]
         raw2 = _call_llm_chat(
-            backend, react_prompts.REACT_SYSTEM_PROMPT, messages2,
+            backend, system_prompt, messages2,
             gemini_model=gemini_model, timeout=timeout, max_tokens=2048,
         )
         calls = 2
@@ -294,19 +526,17 @@ def generate_react(
     final_text = raw2 if raw2 else raw1
     predicted = numeric_eval.extract_react_final_answer(final_text)
 
-    # Build a combined reasoning string for the critic
-    reasoning_parts: list[str] = []
-    if p1.get("thought"):
-        reasoning_parts.append(f"Thought: {p1['thought']}")
-    if p1.get("action_input"):
-        reasoning_parts.append(f"Calculation: {p1['action_input']}")
-    if observation:
-        reasoning_parts.append(f"Observation: {observation}")
+    # Feed the critic the full turn transcript, not a compressed summary.
+    # This reduces false PASS/FAIL outcomes when key details appear outside
+    # the parsed Thought/Action fields.
     if raw2:
-        p2 = react_parse.parse_react_block(raw2)
-        if p2.get("thought"):
-            reasoning_parts.append(f"Conclusion: {p2['thought']}")
-    reasoning = "\n".join(reasoning_parts) if reasoning_parts else raw1
+        reasoning = (
+            f"TURN 1:\n{raw1}\n\n"
+            f"SYSTEM OBSERVATION:\nObservation: {observation or ''}\n\n"
+            f"TURN 2:\n{raw2}"
+        )
+    else:
+        reasoning = raw1
 
     return {
         "raw_turn1": raw1,
@@ -349,12 +579,32 @@ def verify_reasoning(
 # Scoring
 # ======================================================================
 
-def _score_cot(gold: str, raw: str) -> bool:
-    return numeric_eval.answer_matches_qa_answer(gold, raw)
+def _score_cot(gold_answer: str, raw: str) -> bool:
+    return numeric_eval.answer_matches_qa_answer(gold_answer, raw)
 
 
-def _score_react(gold: str, final_text: str) -> bool:
-    return numeric_eval.answer_matches_react_qa_answer(gold, final_text)
+def _score_react(gold_answer: str, final_text: str) -> bool:
+    return numeric_eval.answer_matches_react_qa_answer(gold_answer, final_text)
+
+
+def _score_cot_tatqa(example: dict, raw: str) -> bool:
+    qa = example.get("qa") or {}
+    return numeric_eval.answer_matches_tatqa(
+        qa.get("answer"),
+        raw,
+        answer_type=qa.get("answer_type"),
+        scale=qa.get("scale"),
+    )
+
+
+def _score_react_tatqa(example: dict, final_text: str) -> bool:
+    qa = example.get("qa") or {}
+    return numeric_eval.answer_matches_tatqa(
+        qa.get("answer"),
+        f"FINAL: {numeric_eval.extract_react_final_answer(final_text) or ''}",
+        answer_type=qa.get("answer_type"),
+        scale=qa.get("scale"),
+    )
 
 
 # ======================================================================
@@ -363,19 +613,23 @@ def _score_react(gold: str, final_text: str) -> bool:
 
 def run_cot_pipeline(
     example: dict,
-    gold: str,
+    gold_answer: str,
     *,
     backend: str,
+    dataset: str,
     gemini_model: str | None,
     timeout: int,
     critic_fn,
 ) -> dict:
     """CoT: generate → score → verify (read-only)."""
     gen = generate_cot(
-        example, backend=backend, gemini_model=gemini_model, timeout=timeout,
+        example, backend=backend, dataset=dataset, gemini_model=gemini_model, timeout=timeout,
     )
-    answer_correct = _score_cot(gold, gen["raw"])
-    context = finqa_format.format_finqa_context(example)
+    if dataset == "tatqa":
+        answer_correct = _score_cot_tatqa(example, gen["raw"])
+    else:
+        answer_correct = _score_cot(gold_answer, gen["raw"])
+    context = _format_context(example, dataset)
     question = (example.get("qa") or {}).get("question", "")
     verif = verify_reasoning(question, context, gen["reasoning"], critic_fn)
     return {
@@ -387,9 +641,10 @@ def run_cot_pipeline(
 
 def run_react_pipeline(
     example: dict,
-    gold: str,
+    gold_answer: str,
     *,
     backend: str,
+    dataset: str,
     gemini_model: str | None,
     timeout: int,
     critic_fn,
@@ -397,12 +652,15 @@ def run_react_pipeline(
 ) -> dict:
     """ReAct + tool: generate → score → verify (read-only)."""
     gen = generate_react(
-        example, backend=backend, gemini_model=gemini_model,
+        example, backend=backend, dataset=dataset, gemini_model=gemini_model,
         timeout=timeout, debug=debug,
     )
     final_text = gen["raw_turn2"] if gen["raw_turn2"] else gen["raw_turn1"]
-    answer_correct = _score_react(gold, final_text)
-    context = finqa_format.format_finqa_context(example)
+    if dataset == "tatqa":
+        answer_correct = _score_react_tatqa(example, final_text)
+    else:
+        answer_correct = _score_react(gold_answer, final_text)
+    context = _format_context(example, dataset)
     question = (example.get("qa") or {}).get("question", "")
     verif = verify_reasoning(question, context, gen["reasoning"], critic_fn)
     return {
@@ -414,9 +672,10 @@ def run_react_pipeline(
 
 def run_react_verify_pipeline(
     example: dict,
-    gold: str,
+    gold_answer: str,
     *,
     backend: str,
+    dataset: str,
     gemini_model: str | None,
     timeout: int,
     critic_fn,
@@ -430,54 +689,107 @@ def run_react_verify_pipeline(
     Stops when verification passes or *max_retries* is exhausted.
     The last attempt is used for scoring and categorisation.
     """
-    context = finqa_format.format_finqa_context(example)
+    context = _format_context(example, dataset)
     question = (example.get("qa") or {}).get("question", "")
 
     # --- initial attempt ---
     gen = generate_react(
-        example, backend=backend, gemini_model=gemini_model,
+        example, backend=backend, dataset=dataset, gemini_model=gemini_model,
         timeout=timeout, debug=debug,
     )
     verif = verify_reasoning(question, context, gen["reasoning"], critic_fn)
 
-    attempts: list[dict] = []
-    attempts.append({
+    def _category_rank(cat: str) -> int:
+        # Lower is better; unknown/unparseable categories rank worst.
+        if cat == verification.CATEGORY_CORRECT:
+            return 0
+        if cat in (verification.CATEGORY_FA_INCORRECT, verification.CATEGORY_A_NEQ_C):
+            return 1
+        if cat == verification.CATEGORY_BOTH:
+            return 2
+        return 3
+
+    attempt_bundle: list[dict] = []
+
+    final_text = gen["raw_turn2"] if gen["raw_turn2"] else gen["raw_turn1"]
+    attempt_bundle.append({
         "attempt": 1,
-        "reasoning": gen["reasoning"],
-        "predicted": gen.get("predicted"),
+        "gen": gen,
         "verification": verif,
-        "model_calls": gen["model_calls"],
+        "final_text": final_text,
     })
 
     total_model_calls = gen["model_calls"] + 2  # +2 for the two critic calls
 
     # --- retry loop ---
     retry = 0
-    while verif["category"] != verification.CATEGORY_CORRECT and retry < max_retries:
+    while retry < max_retries:
+        category_ok = verif["category"] == verification.CATEGORY_CORRECT
+        answer_ok = gen.get("predicted") is not None
+        if category_ok and answer_ok:
+            break
+
         retry += 1
-        feedback = verification.build_refinement_feedback(
+        feedback_parts = [verification.build_refinement_feedback(
             verif["logic"], verif["traceability"],
+        )]
+        if not answer_ok:
+            feedback_parts.append(
+                "FORMAT ERROR: Your reply did not contain a parseable 'Final Answer: <value>' line. "
+                "Keep the final answer on a single line and output only the value."
+            )
+        feedback = "\n".join(p for p in feedback_parts if p)
+        print(
+            f"    retry {retry}/{max_retries}: category={verif['category']} "
+            f"parseable_final={answer_ok} → regenerating",
+            flush=True,
         )
-        print(f"    retry {retry}/{max_retries}: {verif['category']} → regenerating", flush=True)
 
         gen = generate_react(
-            example, backend=backend, gemini_model=gemini_model,
+            example, backend=backend, dataset=dataset, gemini_model=gemini_model,
             timeout=timeout, debug=debug, feedback=feedback,
         )
         verif = verify_reasoning(question, context, gen["reasoning"], critic_fn)
         total_model_calls += gen["model_calls"] + 2
 
-        attempts.append({
+        final_text = gen["raw_turn2"] if gen["raw_turn2"] else gen["raw_turn1"]
+        attempt_bundle.append({
             "attempt": retry + 1,
-            "reasoning": gen["reasoning"],
-            "predicted": gen.get("predicted"),
+            "gen": gen,
             "verification": verif,
-            "model_calls": gen["model_calls"],
+            "final_text": final_text,
         })
 
-    # --- score the LAST attempt ---
-    final_text = gen["raw_turn2"] if gen["raw_turn2"] else gen["raw_turn1"]
-    answer_correct = _score_react(gold, final_text)
+    # --- Select best attempt (robust to late-retry regressions) ---
+    # Rank by: parseable final answer -> verification category -> earlier attempt.
+    best_bundle = min(
+        attempt_bundle,
+        key=lambda b: (
+            0 if b["gen"].get("predicted") is not None else 1,
+            _category_rank((b.get("verification") or {}).get("category", "unknown")),
+            b.get("attempt", 10**9),
+        ),
+    )
+
+    gen = best_bundle["gen"]
+    verif = best_bundle["verification"]
+    final_text = best_bundle["final_text"]
+    if dataset == "tatqa":
+        answer_correct = _score_react_tatqa(example, final_text)
+    else:
+        answer_correct = _score_react(gold_answer, final_text)
+
+    retry_history: list[dict] = []
+    for b in attempt_bundle:
+        g = b["gen"]
+        v = b["verification"]
+        retry_history.append({
+            "attempt": b["attempt"],
+            "reasoning": g["reasoning"],
+            "predicted": g.get("predicted"),
+            "verification": v,
+            "model_calls": g["model_calls"],
+        })
 
     return {
         **gen,
@@ -485,7 +797,8 @@ def run_react_verify_pipeline(
         "verification": verif,
         "retries": retry,
         "total_model_calls": total_model_calls,
-        "retry_history": attempts,
+        "selected_attempt": best_bundle["attempt"],
+        "retry_history": retry_history,
     }
 
 
@@ -630,10 +943,16 @@ def main() -> int:
         help="Gemini model id (default: gemini-2.5-flash or GEMINI_MODEL env)",
     )
     ap.add_argument(
+        "--dataset",
+        choices=("finqa", "tatqa"),
+        default="finqa",
+        help="Dataset source (default: finqa). tatqa expects TAT-QA-master/dataset_raw",
+    )
+    ap.add_argument(
         "--split",
         choices=("train", "dev", "test"),
         default="dev",
-        help="FinQA JSON split (default: dev). Ignored if --data is set.",
+        help="JSON split (default: dev). Ignored if --data is set.",
     )
     ap.add_argument(
         "--data", type=Path, default=None,
@@ -653,25 +972,24 @@ def main() -> int:
         help="HTTP timeout seconds per LLM call",
     )
     ap.add_argument(
-        "--max-retries", type=int, default=3,
-        help="Max verification-loop retries (react_tool_verify only, default: 3)",
+        "--max-retries", type=int, default=2,
+        help="Max verification-loop retries (react_tool_verify only, default: 2)",
     )
     ap.add_argument("--debug", action="store_true", help="Print tool call details")
     args = ap.parse_args()
 
     # --- Data ---
-    data_path = (
-        args.data
-        if args.data is not None
-        else finqa_format.default_finqa_json_path(repo, args.split)
+    data_path, split_tag = _resolve_dataset(
+        repo,
+        dataset=args.dataset,
+        split=args.split,
+        data_path_arg=args.data,
     )
-    split_tag = args.split if args.data is None else data_path.stem
     if not data_path.is_file():
         print(f"ERROR: data file not found: {data_path}", file=sys.stderr)
         return 1
 
-    with open(data_path, encoding="utf-8") as f:
-        data = json.load(f)
+    data = _load_examples(args.dataset, data_path)
 
     end = args.offset + args.limit if args.limit is not None else len(data)
     subset = data[args.offset:end]
@@ -686,6 +1004,7 @@ def main() -> int:
 
     # --- Banner ---
     print(f"Mode:    {args.mode}")
+    print(f"Dataset: {args.dataset}")
     print(f"Data:    {data_path}")
     print(f"Subset:  [{args.offset}:{args.offset + len(subset)}] → {len(subset)} items")
     print(f"Backend: {args.backend}" + (f"  model={args.gemini_model}" if args.backend == "gemini" else ""))
@@ -705,12 +1024,12 @@ def main() -> int:
     for i, ex in enumerate(subset):
         eid = ex.get("id", f"row_{args.offset + i}")
         qa = ex.get("qa") or {}
-        gold = qa.get("answer")
-        if gold is None:
+        gold_answer = qa.get("answer")
+        if gold_answer is None:
             print(f"[{i + 1}/{len(subset)}] skip {eid} (no qa.answer)")
             continue
-        gold = str(gold).strip()
-        if not gold:
+        gold_answer = str(gold_answer).strip()
+        if not gold_answer:
             print(f"[{i + 1}/{len(subset)}] skip {eid} (empty qa.answer)")
             continue
 
@@ -720,20 +1039,20 @@ def main() -> int:
         try:
             if args.mode == "cot":
                 result = run_cot_pipeline(
-                    ex, gold,
-                    backend=args.backend, gemini_model=args.gemini_model,
+                    ex, gold_answer,
+                    backend=args.backend, dataset=args.dataset, gemini_model=args.gemini_model,
                     timeout=args.timeout, critic_fn=critic_fn,
                 )
             elif args.mode == "react_tool":
                 result = run_react_pipeline(
-                    ex, gold,
-                    backend=args.backend, gemini_model=args.gemini_model,
+                    ex, gold_answer,
+                    backend=args.backend, dataset=args.dataset, gemini_model=args.gemini_model,
                     timeout=args.timeout, critic_fn=critic_fn, debug=args.debug,
                 )
             elif args.mode == "react_tool_verify":
                 result = run_react_verify_pipeline(
-                    ex, gold,
-                    backend=args.backend, gemini_model=args.gemini_model,
+                    ex, gold_answer,
+                    backend=args.backend, dataset=args.dataset, gemini_model=args.gemini_model,
                     timeout=args.timeout, critic_fn=critic_fn,
                     max_retries=args.max_retries, debug=args.debug,
                 )
@@ -764,7 +1083,10 @@ def main() -> int:
         cat = verif.get("category", "?")
 
         status = "OK" if ok else "FAIL"
-        print(f"  {status}  gold={gold!r}  pred={result.get('predicted')!r}  category={cat}")
+        line = f"  {status}  pred={result.get('predicted')!r}  category={cat}"
+        if not ok:
+            line += f"  expected={gold_answer!r}"
+        print(line)
         if args.mode == "react_tool_verify" and result.get("retries", 0) > 0:
             print(f"    retries={result['retries']}")
         print()
@@ -772,10 +1094,9 @@ def main() -> int:
         rec = {
             "id": eid,
             "mode": args.mode,
+            "dataset": args.dataset,
             "split": split_tag,
             "backend": args.backend,
-            "gold_qa_answer": gold,
-            "gold_exe_ans": qa.get("exe_ans"),
             "predicted": result.get("predicted"),
             "answer_correct": ok,
             "reasoning": (result.get("reasoning") or "")[:16000],
